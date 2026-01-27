@@ -1,0 +1,594 @@
+================================================================================
+PLDT ROUTER API REVERSE ENGINEERING STUDY DATA
+================================================================================
+Router Model: HG6145D2
+Target URL: https://192.168.1.1/fh
+================================================================================
+
+================================================================================
+SECTION 1: AUTHENTICATION
+================================================================================
+
+1.1 Login Flow
+--------------
+Step 1: Access login page to initialize session cookies
+    GET https://192.168.1.1/fh
+
+Step 2: Get session ID
+    GET https://192.168.1.1/cgi-bin/ajax
+    Params:
+        ajaxmethod: get_refresh_sessionid
+        _: [timestamp in milliseconds]
+    
+    Response:
+        { "sessionid": "abc123..." }
+
+Step 3: Encrypt password using AES-128-CBC
+    Key: "opqrstuvwxyz{|}~" (16 bytes)
+    IV:  "opqrstuvwxyz{|}~" (16 bytes)
+    Mode: CBC with PKCS7 padding
+    Output: Hex-encoded uppercase string
+
+Step 4: Submit login
+    POST https://192.168.1.1/cgi-bin/ajax
+    Content-Type: application/x-www-form-urlencoded
+    
+    Form Data:
+        username: [username]
+        loginpd: [AES encrypted password hex]
+        port: 0
+        sessionid: [session ID from step 2]
+        ajaxmethod: do_login
+        fhAccess: 1
+        _: [timestamp]
+    
+    Success Response:
+        { "login_result": 0 }
+    
+    Failure Response:
+        { "login_result": [non-zero] }
+
+Step 5: Refresh session ID after successful login
+    (Same as Step 2)
+
+
+================================================================================
+SECTION 2: DHCP CLIENT LIST (Connected Devices)
+================================================================================
+
+2.1 API Endpoint
+----------------
+GET https://192.168.1.1/cgi-bin/ajax
+
+Query Parameters:
+    ajaxmethod: get_lan_status
+    sessionid: [current session ID] (optional, uses cookie)
+    fhAccess: 1
+    _: [random number or timestamp for cache busting]
+
+Example URL:
+    https://192.168.1.1/cgi-bin/ajax?ajaxmethod=get_lan_status&_=0.123456789
+
+
+2.2 Response Structure
+----------------------
+{
+    "get_lan_status": {
+        "status": "success",
+        "dhcp_user_list": [
+            {
+                "MACAddress": "54:AB:3A:9B:C9:CC",
+                "IPAddress": "192_point_168_point_1_point_2",
+                "HostName": "DESKTOP-F3R9027",
+                "LeaseTimeRemaining": "70923",
+                "AddressSource": "DHCP",
+                "Active": "1",
+                "InterfaceType": "802.11",
+                "AccessType": "2.4G",
+                "rssi": -37,
+                "Tx_rate": "72222"
+            },
+            ...
+        ]
+    }
+}
+
+
+2.3 CRITICAL: IP Address Format
+-------------------------------
+The router returns IP addresses using "_point_" as delimiter instead of "."
+
+Example:
+    Router returns: "192_point_168_point_1_point_2"
+    Must convert to: "192.168.1.2"
+
+Conversion code:
+    ip.replace("_point_", ".")
+
+
+2.4 Field Descriptions
+----------------------
+MACAddress        - Device MAC address (uppercase with colons)
+IPAddress         - IP address (using _point_ format!)
+HostName          - Device hostname/name (can be "unknown")
+LeaseTimeRemaining- DHCP lease time remaining in seconds
+AddressSource     - "DHCP" for dynamic, "Static" for static
+Active            - "1" if active, "0" if inactive
+InterfaceType     - "802.11" for WiFi, "Ethernet" for wired
+AccessType        - "2.4G", "5G", or "Ethernet"
+rssi              - Signal strength in dBm (for WiFi devices)
+Tx_rate           - Transmission rate in kbps
+
+
+2.5 Web Interface Location
+--------------------------
+Status > LAN Status > DHCP Clients List
+Internal iframe URL: https://192.168.1.1/html/dhcp_user_list_inter.html
+JavaScript file: https://192.168.1.1/js/dhcp_user_list_inter.js
+
+
+================================================================================
+SECTION 3: MAC ADDRESS FILTERING (Whitelist/Blacklist)
+================================================================================
+
+3.1 Get MAC Filter Info
+-----------------------
+GET https://192.168.1.1/cgi-bin/ajax
+
+Query Parameters:
+    ajaxmethod: get_ipv4_mac_filter_info
+    sessionid: [session ID]
+    _: [timestamp]
+
+Response Structure (CORRECTED 2026-01-25):
+{
+    "sessionid": "abc123",
+    "session_valid": 1,
+    "ipv4_mac_filter_info": {
+        "MACFEnable": "1",
+        "MACFMode": "white",
+        "mac_filter_data": [
+            {
+                "Enable": "1",
+                "MAC": "74:EB:80:D5:AC:XX",
+                "TimeStart": "00:00",
+                "TimeStop": "23:59",
+                "ipv4_mac_filter_index": 0
+            },
+            ...
+        ]
+    }
+}
+
+IMPORTANT: The MAC list is in ipv4_mac_filter_info.mac_filter_data, NOT mac_filter_info!
+
+
+3.2 Add MAC to Filter (Whitelist/Blacklist) - CORRECTED 2026-01-26
+-------------------------------------------------------------------
+POST https://192.168.1.1/cgi-bin/ajax
+
+CRITICAL: Based on reverse engineering of router's xhr.js and mac_filter_inter.js:
+- ALL parameters must be in POST BODY, not query params!
+- Session ID must be refreshed immediately before each POST request
+- The router's XHR.post() calls get_refresh_sessionid before every POST
+
+Content-Type: application/x-www-form-urlencoded
+
+Form Data (ALL in POST body):
+    ajaxmethod: set_ipv4_mac_filter_info
+    sessionid: [freshly refreshed session ID]
+    _: [random number for cache busting]
+    action: add
+    MAC: [MAC address in uppercase, e.g., "AA:BB:CC:DD:EE:FF"]
+    TimeStart: 00:00
+    TimeStop: 23:59
+    Enable: 1
+
+WRONG field names (DO NOT USE):
+    - mac_filter_mac (WRONG - use MAC)
+    - mac_filter_start_hour/min (WRONG - use TimeStart as "HH:MM")
+    - mac_filter_end_hour/min (WRONG - use TimeStop as "HH:MM")
+    - mac_filter_enable (WRONG - use Enable)
+
+Success Response:
+    Status 200 with updated mac_filter_data list
+
+
+3.3 Remove MAC from Filter - CORRECTED 2026-01-26
+-------------------------------------------------
+POST https://192.168.1.1/cgi-bin/ajax
+
+CRITICAL: Same as 3.2 - all parameters in POST BODY, refresh session first!
+
+Content-Type: application/x-www-form-urlencoded
+
+Form Data (ALL in POST body):
+    ajaxmethod: set_ipv4_mac_filter_info
+    sessionid: [freshly refreshed session ID]
+    _: [random number for cache busting]
+    action: delete
+    ipv4_mac_filter_index: [index from mac_filter_data entry, 1-based]
+
+NOTE: The index comes from the "ipv4_mac_filter_index" field in each
+      mac_filter_data entry, NOT the array position!
+
+Success Response:
+    Status 200 with { "session_valid": 1 }
+
+
+3.4 Enable/Disable MAC Filtering Globally
+-----------------------------------------
+POST https://192.168.1.1/cgi-bin/ajax
+
+Query Parameters:
+    ajaxmethod: set_ipv4_mac_filter_info
+    sessionid: [session ID]
+    _: [timestamp]
+
+Form Data:
+    action: enable
+    ipv4_mac_filter_enable: 0 (disable) or 1 (enable)
+    ipv4_mac_filter_mode: white (whitelist) or black (blacklist)
+
+
+3.5 Web Interface Location
+--------------------------
+Security > Firewall > MAC Filtering
+Internal iframe URL: https://192.168.1.1/html/mac_filter_inter.html
+JavaScript file: https://192.168.1.1/js/mac_filter_inter.js
+
+
+================================================================================
+SECTION 4: SESSION MANAGEMENT
+================================================================================
+
+4.1 Session ID Refresh
+----------------------
+The router uses session IDs that need to be refreshed periodically.
+
+GET https://192.168.1.1/cgi-bin/ajax?ajaxmethod=get_refresh_sessionid&_=[timestamp]
+
+Response:
+    { "sessionid": "new_session_id_here" }
+
+4.2 Session Validation
+----------------------
+When a session expires, the API returns:
+    { "session_valid": 0 }
+
+Action required: Re-login and retry the request.
+
+4.3 Cookie-based Authentication
+-------------------------------
+After login, the session is maintained via cookies.
+The requests library maintains cookies automatically via session object.
+
+
+================================================================================
+SECTION 5: COMMON XHR OBJECT (JavaScript)
+================================================================================
+
+5.1 Router's XHR Wrapper
+------------------------
+The router uses a custom XHR object located at:
+    https://192.168.1.1/js/xhr.js
+
+It provides methods like:
+    XHR.get(ajaxmethod, callback)
+    XHR.post(data, callback)
+    XHR.poll(ajaxmethod, interval, callback)
+
+Base URL for AJAX calls:
+    Variable name: ajaxcgi
+    Value: "/cgi-bin/ajax"
+
+
+================================================================================
+SECTION 6: OTHER USEFUL ENDPOINTS (Discovered but not fully tested)
+================================================================================
+
+6.1 DHCP LAN Info (Static Leases)
+---------------------------------
+GET /cgi-bin/ajax?ajaxmethod=get_dhcp_lan_info
+
+6.2 WiFi Status
+---------------
+GET /cgi-bin/ajax?ajaxmethod=get_wifi_status
+
+6.3 WAN Status
+--------------
+GET /cgi-bin/ajax?ajaxmethod=get_wan_status
+
+6.4 System Info
+---------------
+GET /cgi-bin/ajax?ajaxmethod=get_system_info
+
+
+================================================================================
+SECTION 7: PAGE STRUCTURE
+================================================================================
+
+7.1 Main Interface
+------------------
+The router web interface uses iframes for content.
+Main page: https://192.168.1.1/html/main_pldt.html
+
+Each menu item loads a different iframe:
+    - Status pages in: /html/status_*.html
+    - Security pages in: /html/mac_filter_inter.html, etc.
+    - Settings pages in: /html/*_inter.html
+
+7.2 JavaScript Files
+--------------------
+Each iframe has a corresponding JS file:
+    /html/dhcp_user_list_inter.html -> /js/dhcp_user_list_inter.js
+    /html/mac_filter_inter.html -> /js/mac_filter_inter.js
+
+
+================================================================================
+SECTION 8: IMPORTANT IMPLEMENTATION NOTES
+================================================================================
+
+8.1 Always Use HTTPS
+--------------------
+The router uses HTTPS with a self-signed certificate.
+Disable SSL verification: verify=False
+
+8.2 Cache Busting Required
+--------------------------
+Always include the "_" parameter with a random number or timestamp
+to prevent browser/router caching issues.
+
+8.3 Content-Type for POST
+-------------------------
+Must use: application/x-www-form-urlencoded
+(Not JSON!)
+
+8.4 fhAccess Parameter
+----------------------
+Include "fhAccess": "1" in requests to indicate access via /fh interface.
+
+8.5 Request Timeout
+-------------------
+Recommend 10 second timeout for all requests.
+Router can be slow under load.
+
+
+================================================================================
+SECTION 9: PYTHON IMPLEMENTATION REFERENCE
+================================================================================
+
+9.1 AES Encryption for Password
+-------------------------------
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+import binascii
+
+AES_KEY = "opqrstuvwxyz{|}~".encode('utf-8')
+AES_IV = "opqrstuvwxyz{|}~".encode('utf-8')
+
+def fhencrypt(password):
+    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
+    padded_data = pad(password.encode('utf-8'), AES.block_size)
+    encrypted = cipher.encrypt(padded_data)
+    return binascii.hexlify(encrypted).decode('utf-8').upper()
+
+
+9.2 IP Address Conversion
+-------------------------
+def convert_ip(ip_str):
+    if ip_str and "_point_" in ip_str:
+        return ip_str.replace("_point_", ".")
+    return ip_str
+
+
+9.3 Parse Response
+------------------
+def parse_response(text):
+    """Parse router response - strips HTTP headers if present"""
+    json_start = text.find('{')
+    if json_start == -1:
+        return None
+    try:
+        return json.loads(text[json_start:])
+    except json.JSONDecodeError:
+        return None
+
+
+================================================================================
+END OF STUDY DATA
+================================================================================
+
+================================================================================
+SECTION 10: SSID NAME AND LAN PORT MAPPING (ADDED 2026-01-25)
+================================================================================
+
+10.1 SSID Name Mappings API
+---------------------------
+GET https://192.168.1.1/cgi-bin/ajax
+
+Query Parameters:
+    ajaxmethod: vlanbind
+    sessionid: [session ID]
+    _: [timestamp]
+
+Response Structure:
+{
+    "wifi_obj_enable": {
+        "ssid1": "PLDTHOMEFIBR522b0",    // 2.4GHz SSID #1
+        "ssid2": "fh_ssid2",              // 2.4GHz SSID #2
+        "ssid3": "fh_ssid3",              // 2.4GHz SSID #3
+        "ssid4": "fh_ssid4",              // 2.4GHz SSID #4
+        "ssid5": "PLDTHOMEFIBR522b0",    // 5GHz SSID #1
+        "ssid6": "Offline_5G",            // 5GHz SSID #2
+        "ssid7": "fh_5G_ssid3",           // 5GHz SSID #3
+        "ssid8": "fh_5G_ssid4"            // 5GHz SSID #4
+    }
+}
+
+SSID Index Mapping:
+    ssid1-4 = 2.4GHz band
+    ssid5-8 = 5GHz band
+
+
+10.2 Layer2Interface Field Format
+---------------------------------
+The DHCP client list (get_lan_status) returns a Layer2Interface field that maps
+devices to their physical connection point.
+
+Format Examples:
+    "InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.2." -> LAN Port 2
+    "InternetGatewayDevice.LANDevice.1.LANEthernetInterfaceConfig.1." -> LAN Port 1
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1."          -> ssid1 (2.4GHz)
+    "InternetGatewayDevice.LANDevice.1.WLANConfiguration.5."          -> ssid5 (5GHz)
+
+
+10.3 Parsing Layer2Interface
+----------------------------
+Ethernet:
+    Match: LANEthernetInterfaceConfig.(\d+)
+    Result: LAN Port + matched number
+
+WiFi:
+    Match: WLANConfiguration.(\d+)
+    Result: ssid{matched number} -> lookup in vlanbind response
+    Band: 1-4 = 2.4GHz, 5-8 = 5GHz
+
+
+10.4 Python Implementation
+--------------------------
+import re
+
+def parse_layer2_interface(layer2_interface, interface_type, ssid_map):
+    if not layer2_interface:
+        return interface_type or "Connected"
+    
+    # Handle Ethernet
+    if "LANEthernetInterfaceConfig" in layer2_interface:
+        match = re.search(r'LANEthernetInterfaceConfig\.(\d+)', layer2_interface)
+        if match:
+            return f"LAN Port {match.group(1)}"
+        return "Ethernet"
+    
+    # Handle WiFi
+    if "WLANConfiguration" in layer2_interface:
+        match = re.search(r'WLANConfiguration\.(\d+)', layer2_interface)
+        if match:
+            wlan_index = match.group(1)
+            ssid_key = f"ssid{wlan_index}"
+            if ssid_key in ssid_map:
+                band = "(5G)" if int(wlan_index) >= 5 else "(2.4G)"
+                return f"{ssid_map[ssid_key]} {band}"
+    
+    return interface_type or "Connected"
+
+
+================================================================================
+SECTION 11: CRITICAL POST REQUEST FORMAT (ADDED 2026-01-26)
+================================================================================
+
+11.1 Key Discovery from Reverse Engineering
+--------------------------------------------
+The router's JavaScript (xhr.js) handles POST requests differently from GET:
+
+From xhr.js:
+```javascript
+this.post = function(ajaxmethod,data,callback)
+{
+    this.reinit();
+    var that = this;
+    (new XHR()).get("get_refresh_sessionid", null, function(getdata){
+        if ( getdata.sessionid != undefined )
+        {
+           data.sessionid = getdata.sessionid;  // Session ID added to POST data
+           that.post2(ajaxmethod, data, callback);
+        };
+    });
+}
+
+this._encode_new = function(ajaxmethod, obj)
+{
+    obj['ajaxmethod'] = ajaxmethod;  // ajaxmethod added to data object
+    obj['_'] = Math.random();        // Random cache buster added
+    // ... then URL-encoded
+}
+```
+
+11.2 Correct POST Request Format
+--------------------------------
+For ALL POST requests to the router:
+
+1. REFRESH session ID first:
+   GET /cgi-bin/ajax?ajaxmethod=get_refresh_sessionid&_=[random]
+
+2. PUT ALL PARAMETERS IN POST BODY (not query params!):
+   - ajaxmethod: [method name]
+   - sessionid: [freshly refreshed session ID]
+   - _: [random number]
+   - [action-specific fields...]
+
+3. POST to /cgi-bin/ajax with NO query parameters
+
+11.3 Python Implementation
+--------------------------
+def api_post(self, method, data):
+    # Step 1: Refresh session ID
+    resp = self.session.get(
+        f"{router_url}/cgi-bin/ajax",
+        params={"ajaxmethod": "get_refresh_sessionid", "_": str(random.random())},
+        verify=False
+    )
+    result = self.parse_response(resp.text)
+    session_id = result.get('sessionid', self.session_id)
+
+    # Step 2: Build POST body with ALL parameters
+    post_data = {
+        "ajaxmethod": method,
+        "sessionid": session_id,
+        "_": str(random.random()),
+    }
+    post_data.update(data)  # Add action-specific fields
+
+    # Step 3: POST with NO query params
+    response = self.session.post(
+        f"{router_url}/cgi-bin/ajax",
+        data=post_data,  # All in body
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        verify=False
+    )
+    return response
+
+
+11.4 Common Mistake (WRONG)
+---------------------------
+DO NOT DO THIS:
+```python
+# WRONG - ajaxmethod in query params
+response = session.post(
+    f"{router_url}/cgi-bin/ajax",
+    params={"ajaxmethod": method, "sessionid": session_id},  # WRONG!
+    data={"action": "add", "MAC": mac}
+)
+# Results in HTTP 403 Forbidden
+```
+
+DO THIS INSTEAD:
+```python
+# CORRECT - everything in POST body
+response = session.post(
+    f"{router_url}/cgi-bin/ajax",
+    data={
+        "ajaxmethod": method,
+        "sessionid": session_id,
+        "_": str(random.random()),
+        "action": "add",
+        "MAC": mac
+    }
+)
+# Results in HTTP 200 OK
+```
+
+
+================================================================================
+END OF STUDY DATA
+================================================================================

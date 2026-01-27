@@ -1,0 +1,6 @@
+flask>=2.0.0
+flask-cors>=3.0.0
+requests>=2.25.0
+urllib3>=1.26.0
+pycryptodome>=3.10.0
+

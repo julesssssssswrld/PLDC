@@ -1,0 +1,12 @@
+{
+  "router_url": "https://192.168.1.1",
+  "username": "adminpldt",
+  "password": "JulesIan8501_",
+  "is_authenticated": true,
+  "private_ssids": [
+    "PLDTHOMEFIBR522b0",
+    "Offline_5G"
+  ],
+  "manual_overrides": {},
+  "public_ssid_allowed": {}
+}

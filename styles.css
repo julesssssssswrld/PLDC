@@ -1,0 +1,636 @@
+/* ========================================
+   CSS Design System - PLDT WiFi Manager
+   ======================================== */
+
+/* Import Montserrat Font */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+
+/* CSS Variables */
+:root {
+    --primary-color: #D2272A;
+    --background-color: #F7F7F7;
+    --text-color: #333333;
+    --text-light: #666666;
+    --white: #FFFFFF;
+    --border-color: rgba(0, 0, 0, 0.25);
+    --icon-inactive: rgba(0, 0, 0, 0.25);
+    --status-green: #4CAF50;
+    --status-red: #D2272A;
+    --status-gray: #9E9E9E;
+    --shadow: 0 0.125rem 0.5rem rgba(0, 0, 0, 0.1);
+    --nav-color: rgba(0, 0, 0, 0.50);
+}
+
+/* Reset & Base Styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html {
+    font-size: 16px;
+}
+
+body {
+    font-family: 'Montserrat', sans-serif;
+    background-color: var(--background-color);
+    color: var(--text-color);
+    min-height: 100vh;
+    display: flex;
+}
+
+/* ========================================
+   Layout
+   ======================================== */
+
+.app-container {
+    display: flex;
+    width: 100%;
+    min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 18rem;
+    padding: 5rem 3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.625rem 0.75rem;
+    text-decoration: none;
+    color: var(--nav-color);
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 0.5rem;
+    transition: all 0.2s ease;
+}
+
+.nav-item:hover {
+    background-color: rgba(210, 39, 42, 0.1);
+}
+
+.nav-item.active {
+    color: var(--primary-color);
+}
+
+.nav-item.active svg {
+    fill: var(--primary-color);
+}
+
+.nav-item svg {
+    width: 2rem;
+    height: 2rem;
+    fill: var(--icon-inactive);
+    flex-shrink: 0;
+}
+
+/* Main Content */
+.main-content {
+    flex: 1;
+    padding: 5rem 2.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+/* Status Indicator */
+.status-indicator {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+    background-color: var(--status-gray);
+}
+
+.status-indicator.green {
+    background-color: var(--status-green);
+}
+
+.status-indicator.red {
+    background-color: var(--status-red);
+}
+
+/* ========================================
+   Typography
+   ======================================== */
+
+.section-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text-color);
+}
+
+.label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-light);
+    margin-bottom: 0.375rem;
+}
+
+/* ========================================
+   Tables
+   ======================================== */
+
+.table-container {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: var(--white);
+    font-size: 0.75rem;
+}
+
+th,
+td {
+    padding: 0.625rem 1rem;
+    text-align: center;
+    border: 1px solid var(--border-color);
+}
+
+th {
+    background-color: var(--white);
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+td {
+    color: var(--text-light);
+}
+
+/* Status dots in table */
+.status-dot {
+    display: inline-block;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+}
+
+.status-dot.green {
+    background-color: var(--status-green);
+}
+
+.status-dot.red {
+    background-color: var(--status-red);
+}
+
+/* ========================================
+   Cards
+   ======================================== */
+
+.card {
+    background-color: var(--white);
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+}
+
+.card-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+    color: var(--text-color);
+}
+
+/* ========================================
+   Form Elements
+   ======================================== */
+
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-light);
+    margin-bottom: 0.375rem;
+}
+
+.form-input {
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.875rem;
+    border: 1px solid var(--border-color);
+    border-radius: 25px;
+    outline: none;
+    transition: border-color 0.2s ease;
+}
+
+.form-input:focus {
+    border-color: var(--primary-color);
+}
+
+.form-input::placeholder {
+    color: #BDBDBD;
+}
+
+select.form-input {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right 0.875rem center;
+    background-size: 1rem;
+    padding-right: 2.5rem;
+    cursor: pointer;
+}
+
+/* Password Toggle */
+.password-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.password-wrapper .form-input {
+    padding-right: 2.5rem;
+}
+
+.btn-icon {
+    position: absolute;
+    right: 0.5rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.btn-icon:hover {
+    opacity: 1;
+}
+
+/* ========================================
+   Buttons
+   ======================================== */
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.625rem 1.5rem;
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-radius: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-decoration: none;
+}
+
+.btn-primary {
+    background-color: var(--primary-color);
+    color: var(--white);
+    border: none;
+}
+
+.btn-primary:hover {
+    background-color: #b8222a;
+}
+
+.btn-outline {
+    background-color: transparent;
+    color: var(--primary-color);
+    border: 1px solid var(--primary-color);
+}
+
+.btn-outline:hover {
+    background-color: rgba(210, 39, 42, 0.1);
+}
+
+.btn-group {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+}
+
+/* ========================================
+   Page Layouts
+   ======================================== */
+
+/* Home Page */
+.home-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+.device-table-section {
+    max-width: 56rem;
+    position: relative;
+}
+
+/* Loading Overlay */
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(247, 247, 247, 0.95);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    z-index: 100;
+}
+
+.loading-overlay.hidden {
+    display: none;
+}
+
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(210, 39, 42, 0.2);
+    border-top-color: var(--primary-color);
+    border-radius: 50%;
+    animation: loadingSpin 0.8s linear infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.loading-spinner.error {
+    border: none;
+    animation: none;
+    color: var(--primary-color);
+    animation: errorPop 0.3s ease-out;
+}
+
+@keyframes loadingSpin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes errorPop {
+    0% {
+        transform: scale(0.5);
+        opacity: 0;
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.loading-status {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-light);
+    text-align: center;
+    max-width: 300px;
+}
+
+.loading-status.error {
+    color: var(--primary-color);
+}
+
+.table-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
+
+.table-actions .btn {
+    min-width: 9rem;
+}
+
+/* Settings Page */
+.settings-content {
+    display: flex;
+    gap: 6rem;
+    align-items: flex-start;
+}
+
+.credentials-section {
+    min-width: 14rem;
+}
+
+.credentials-section .btn-group .btn {
+    flex: 1;
+}
+
+.legend-section {
+    min-width: 16rem;
+}
+
+.legend-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+    color: var(--text-color);
+}
+
+.legend-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    font-size: 0.875rem;
+    color: var(--text-color);
+}
+
+.legend-dot {
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.legend-dot.gray {
+    background-color: var(--status-gray);
+}
+
+.legend-dot.red {
+    background-color: var(--status-red);
+}
+
+.legend-dot.green {
+    background-color: var(--status-green);
+}
+
+/* Private SSIDs Section */
+.private-ssids-section {
+    min-width: 18rem;
+}
+
+.section-description {
+    font-size: 0.75rem;
+    color: var(--text-light);
+    margin-bottom: 1rem;
+    line-height: 1.4;
+}
+
+.ssid-add-wrapper {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.ssid-add-wrapper .form-input {
+    flex: 1;
+}
+
+.ssid-add-wrapper .btn {
+    flex-shrink: 0;
+}
+
+.ssid-chips-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-height: 2.5rem;
+    padding: 0.5rem;
+    background-color: var(--white);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+}
+
+.ssid-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    background-color: rgba(210, 39, 42, 0.1);
+    color: var(--primary-color);
+    font-size: 0.75rem;
+    font-weight: 500;
+    border-radius: 1rem;
+}
+
+.ssid-chip-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem;
+    height: 1rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--primary-color);
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.ssid-chip-remove:hover {
+    opacity: 1;
+}
+
+.ssid-note {
+    font-size: 0.7rem;
+    color: var(--text-light);
+    margin-top: 0.5rem;
+}
+
+.ssid-empty-message {
+    font-size: 0.75rem;
+    color: var(--text-light);
+    font-style: italic;
+}
+
+/* ========================================
+   Responsive
+   ======================================== */
+
+@media (max-width: 768px) {
+    .app-container {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: auto;
+        padding: 0.4rem 1rem;
+        flex-direction: row;
+        justify-content: space-evenly;
+        background-color: var(--background-color);
+        z-index: 1000;
+    }
+
+    .nav-item {
+        flex: 0 1 auto;
+        padding: 0.3rem 0.5rem;
+        flex-direction: column;
+        gap: 0.125rem;
+        font-size: 0.7rem;
+        border-radius: 0.5rem;
+    }
+
+    .nav-item svg {
+        width: 1.25rem;
+        height: 1.25rem;
+    }
+
+    .main-content {
+        padding: 1.5rem;
+        padding-bottom: 4.5rem;
+        /* Space for bottom nav */
+    }
+
+    .settings-content {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .credentials-section,
+    .legend-section {
+        width: 100%;
+    }
+
+    .private-ssids-section {
+        width: 100%;
+    }
+
+    .ssid-add-wrapper {
+        flex-direction: column;
+    }
+
+    .ssid-add-wrapper .btn {
+        width: 100%;
+    }
+
+    .table-actions {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .table-actions .btn {
+        width: 100%;
+    }
+}

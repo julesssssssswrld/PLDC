@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PLDT WiFi Manager - Home</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-status" id="loadingStatus">Initializing...</div>
+    </div>
+    <div class="app-container">
+        <div class="status-indicator gray" id="statusIndicator"></div>
+        <nav class="sidebar" id="sidebar"></nav>
+
+        <main class="main-content">
+            <div class="home-content">
+                <section class="device-table-section">
+                    <h2 class="section-title">Connected Devices</h2>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Device Name</th>
+                                    <th>MAC Address</th>
+                                    <th>IP Address</th>
+                                    <th>Time</th>
+                                    <th>Connection</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="deviceTableBody"></tbody>
+                        </table>
+                    </div>
+                    <div class="table-actions">
+                        <button class="btn btn-primary">Connect</button>
+                        <button class="btn btn-primary">Disconnect</button>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+    <script src="components.js"></script>
+</body>
+
+</html>
