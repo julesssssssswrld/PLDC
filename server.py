@@ -103,10 +103,13 @@ def process_expired_devices(router_instance):
         for mac, data in list(public_ssid_allowed.items()):
             expire_time = data.get("expires", 0) if isinstance(data, dict) else 0
             if current_time >= expire_time:
-                # Router call inside lock - acceptable since this only runs in background thread
-                if router_instance.remove_mac_from_whitelist(mac):
-                    expired_macs.append(mac)
+                # Mark as expired - we'll clean up config regardless of router removal result
+                expired_macs.append(mac)
+                # Attempt to remove from router whitelist (best effort)
+                # This may fail if device already left or was manually removed, which is fine
+                router_instance.remove_mac_from_whitelist(mac)
 
+        # Always clean up expired entries from config, regardless of router removal result
         if expired_macs:
             for mac in expired_macs:
                 if mac in public_ssid_allowed:
@@ -614,13 +617,15 @@ def cleanup_expired_devices():
         try:
             config = load_config()
             if config.get("public_ssid_allowed", {}):
-                # Use global router instance with ensure_connected for session consistency
-                if router.ensure_connected():
-                    expired_macs = process_expired_devices(router)
-                    if expired_macs:
-                        print(f"Background cleanup: Removed {len(expired_macs)} expired device(s).")
-                else:
-                    print("Background cleanup: Failed to connect to router.")
+                # Try to connect to router for whitelist removal (best effort)
+                router_connected = router.ensure_connected()
+                if not router_connected:
+                    print("Background cleanup: Router not connected, will still clean up config.")
+
+                # Always attempt cleanup - router removal is best effort
+                expired_macs = process_expired_devices(router)
+                if expired_macs:
+                    print(f"Background cleanup: Removed {len(expired_macs)} expired device(s).")
         except Exception as e:
             print(f"Background cleanup error: {e}")
 
