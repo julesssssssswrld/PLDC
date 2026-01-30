@@ -42,7 +42,7 @@ if %errorLevel% neq 0 (
 echo   Server starting on:
 echo.
 echo   ADMIN PANEL:    http://192.168.1.200
-echo   CAPTIVE PORTAL: http://192.168.1.2
+echo   LOCAL ACCESS:   http://localhost
 echo.
 echo   Press Ctrl+C to stop the server
 echo ============================================================

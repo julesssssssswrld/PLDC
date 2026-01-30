@@ -4,9 +4,7 @@
 
 const API_BASE = '/api';
 
-// ============================================================
-// Toast Notification System
-// ============================================================
+
 
 const Toast = {
     container: null,
@@ -131,9 +129,7 @@ toastStyles.textContent = `
 `;
 document.head.appendChild(toastStyles);
 
-// ============================================================
-// API Client
-// ============================================================
+
 
 const api = {
     async get(endpoint) {
@@ -161,9 +157,7 @@ const api = {
     }
 };
 
-// ============================================================
-// Sidebar Template
-// ============================================================
+
 
 const sidebarTemplate = `
     <a href="index.html" class="nav-item" data-page="home">
@@ -178,9 +172,7 @@ const sidebarTemplate = `
     </a>
 `;
 
-// ============================================================
-// Status Indicator
-// ============================================================
+
 
 async function updateStatus() {
     const data = await api.get('/status');
@@ -196,9 +188,7 @@ function setStatus(status) {
     }
 }
 
-// ============================================================
 // Device Table (Home Page)
-// ============================================================
 
 let selectedDevices = new Set();
 let deviceExpiries = {}; // Store expiry timestamps: { mac: expiryTimestamp }
@@ -206,15 +196,24 @@ let countdownInterval = null;
 
 function updateCountdowns() {
     const now = Math.floor(Date.now() / 1000);
+    let hasExpired = false;
 
     document.querySelectorAll('tr[data-mac]').forEach(row => {
         const mac = row.dataset.mac;
         const timeCell = row.children[4]; // Time is 5th column (index 4)
+        const statusCell = row.children[6]; // Status is 7th column (index 6)
 
         if (deviceExpiries[mac]) {
             const remaining = deviceExpiries[mac] - now;
             if (remaining <= 0) {
-                timeCell.textContent = '00:00:00';
+                timeCell.textContent = 'EXPIRED';
+                // Update status dot to red when expired
+                const statusDot = statusCell.querySelector('.status-dot');
+                if (statusDot && statusDot.classList.contains('green')) {
+                    statusDot.classList.remove('green');
+                    statusDot.classList.add('red');
+                    hasExpired = true;
+                }
             } else {
                 const hours = Math.floor(remaining / 3600);
                 const minutes = Math.floor((remaining % 3600) / 60);
@@ -223,6 +222,11 @@ function updateCountdowns() {
             }
         }
     });
+
+    // If any device expired, refresh the table after a short delay to sync with server
+    if (hasExpired) {
+        setTimeout(() => loadDeviceTable(), 2000);
+    }
 }
 
 // Track if this is the first load (show full overlay) or a refresh (hide overlay)
@@ -468,9 +472,7 @@ async function disconnectSelectedDevices() {
     await loadDeviceTable();
 }
 
-// ============================================================
-// Settings Page
-// ============================================================
+
 
 async function loadAuthStatus() {
     const usernameInput = document.getElementById('username');
@@ -545,9 +547,7 @@ async function logout() {
     Toast.success('Logged out successfully');
 }
 
-// ============================================================
-// Private SSIDs Management
-// ============================================================
+
 
 let currentPrivateSsids = [];
 
@@ -656,9 +656,7 @@ async function savePrivateSsids() {
     }
 }
 
-// ============================================================
-// Initialization
-// ============================================================
+
 
 function initComponents() {
     // Inject sidebar

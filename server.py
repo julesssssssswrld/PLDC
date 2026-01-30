@@ -1,7 +1,4 @@
-"""
-PLDT WiFi Manager - Backend Server
-Pure HTTP requests to router, no browser automation.
-"""
+"""PLDT WiFi Manager - Backend Server. Pure HTTP requests to router, no browser automation."""
 
 import os
 import json
@@ -18,9 +15,7 @@ from Crypto.Util.Padding import pad
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ============================================================
-# Configuration
-# ============================================================
+
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
@@ -38,11 +33,14 @@ AES_KEY = "opqrstuvwxyz{|}~".encode('utf-8')
 AES_IV = "opqrstuvwxyz{|}~".encode('utf-8')
 
 
-# ============================================================
-# Helper Functions
-# ============================================================
 
-config_lock = threading.Lock()
+
+config_lock = threading.RLock()  # RLock to allow reentrant access from same thread
+
+# Queue for devices pending removal from router whitelist
+# Background thread adds to this, list_devices endpoint processes it
+pending_whitelist_removals = []
+pending_removals_lock = threading.Lock()
 
 def load_config():
     """Load configuration from JSON file"""
@@ -77,24 +75,16 @@ def format_time_remaining(expire_timestamp):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def process_expired_devices(router_instance):
-    """Remove expired public SSID devices from whitelist and config using the given router instance.
+def mark_expired_devices():
+    """Check for expired devices and mark them for removal without making router API calls."""
+    global pending_whitelist_removals
 
-    Uses atomic read-modify-write pattern to prevent race conditions.
-    Only called from the background cleanup thread.
-    """
-    # Hold the config lock for the entire read-modify-write cycle
     with config_lock:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-        else:
-            config = {
-                "router_url": ROUTER_BASE_URL,
-                "username": "",
-                "password": "",
-                "is_authenticated": False
-            }
+        if not os.path.exists(CONFIG_FILE):
+            return []
+
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
 
         public_ssid_allowed = config.get("public_ssid_allowed", {})
         current_time = int(time.time())
@@ -102,28 +92,96 @@ def process_expired_devices(router_instance):
 
         for mac, data in list(public_ssid_allowed.items()):
             expire_time = data.get("expires", 0) if isinstance(data, dict) else 0
-            if current_time >= expire_time:
-                # Mark as expired - we'll clean up config regardless of router removal result
-                expired_macs.append(mac)
-                # Attempt to remove from router whitelist (best effort)
-                # This may fail if device already left or was manually removed, which is fine
-                router_instance.remove_mac_from_whitelist(mac)
 
-        # Always clean up expired entries from config, regardless of router removal result
+            if current_time >= expire_time:
+                print(f"DEBUG mark_expired_devices: Device {mac} has expired")
+                expired_macs.append(mac)
+
+        # Remove expired entries from config and queue them for router removal
         if expired_macs:
+            print(f"DEBUG mark_expired_devices: Marking {len(expired_macs)} expired devices for removal")
             for mac in expired_macs:
                 if mac in public_ssid_allowed:
                     del public_ssid_allowed[mac]
+
             config["public_ssid_allowed"] = public_ssid_allowed
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2)
 
+            # Add to pending removals queue (to be processed by list_devices)
+            with pending_removals_lock:
+                for mac in expired_macs:
+                    if mac not in pending_whitelist_removals:
+                        pending_whitelist_removals.append(mac)
+
         return expired_macs
 
 
-# ============================================================
-# Router API Class
-# ============================================================
+def _update_private_device_seen(mac):
+    """Update the last_seen timestamp for a private device to track for stale cleanup."""
+    with config_lock:
+        if not os.path.exists(CONFIG_FILE):
+            return
+        
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        
+        private_device_seen = config.get("private_device_seen", {})
+        private_device_seen[mac.upper()] = int(time.time())
+        config["private_device_seen"] = private_device_seen
+        
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+
+
+def process_pending_removals(router_instance):
+    """Process pending whitelist removals with rate limiting and verification."""
+    global pending_whitelist_removals
+
+    with pending_removals_lock:
+        if not pending_whitelist_removals:
+            return
+
+        # Take a copy and clear the queue
+        macs_to_remove = pending_whitelist_removals.copy()
+        pending_whitelist_removals.clear()
+
+    # Process removals with rate limiting (1 second between each)
+    for mac in macs_to_remove:
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                print(f"DEBUG process_pending_removals: Removing {mac} (attempt {attempt + 1})")
+                result = router_instance.remove_mac_from_whitelist(mac)
+                
+                if result:
+                    # Verify removal by checking whitelist
+                    time.sleep(0.5)  # Brief wait before verification
+                    whitelist = router_instance.get_mac_whitelist()
+                    mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
+                    if isinstance(mac_filter_info, dict):
+                        mac_list = mac_filter_info.get("mac_filter_data", [])
+                        still_exists = any(entry.get("MAC", "").upper() == mac.upper() for entry in mac_list if isinstance(mac_list, list))
+                        if not still_exists:
+                            print(f"DEBUG process_pending_removals: Verified {mac} removed")
+                            break
+                        else:
+                            print(f"DEBUG process_pending_removals: {mac} still in whitelist, retrying...")
+                else:
+                    print(f"DEBUG process_pending_removals: Removal returned False for {mac}")
+                    
+            except Exception as e:
+                print(f"DEBUG process_pending_removals: Failed to remove {mac}: {e}")
+            
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries:
+                time.sleep(1 * (attempt + 1))
+        
+        # Rate limit: wait 1 second before processing next MAC
+        time.sleep(1)
+
+
+
 
 class PLDTRouter:
     def __init__(self):
@@ -241,6 +299,51 @@ class PLDTRouter:
                 self.last_error = str(e)
                 self.is_connected = False
                 print(f"Login encountered an exception: {e}")
+                return False
+
+    def router_logout(self):
+        """Logout from router to terminate sessio"""
+        with self._lock:
+            try:
+                config = load_config()
+                router_url = config.get('router_url', ROUTER_BASE_URL)
+
+                # Refresh session ID before logout
+                self.refresh_session_id()
+
+                logout_data = {
+                    "ajaxmethod": "do_logout",
+                    "sessionid": self.session_id,
+                    "_": str(int(time.time() * 1000))
+                }
+
+                response = self.session.post(
+                    f"{router_url}/cgi-bin/ajax",
+                    data=logout_data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    verify=False,
+                    timeout=10
+                )
+
+                print(f"DEBUG router_logout status={response.status_code}")
+
+                # Clear session state regardless of response
+                self.session_id = None
+                self.is_connected = False
+
+                # Create a new session for future logins
+                self.session = requests.Session()
+                self.session.verify = False
+
+                return response.status_code == 200
+
+            except Exception as e:
+                print(f"Router logout error: {e}")
+                # Still clear local state even if router logout fails
+                self.session_id = None
+                self.is_connected = False
+                self.session = requests.Session()
+                self.session.verify = False
                 return False
 
     def api_call(self, method, extra_params=None):
@@ -565,20 +668,34 @@ class PLDTRouter:
     
     def remove_mac_from_whitelist(self, mac_address):
         """Remove MAC address from whitelist by finding its index"""
+        print(f"DEBUG remove_mac_from_whitelist: Attempting to remove {mac_address}")
         whitelist = self.get_mac_whitelist()
+        print(f"DEBUG remove_mac_from_whitelist: Whitelist response keys: {whitelist.keys() if whitelist else 'None'}")
+
         mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
+        print(f"DEBUG remove_mac_from_whitelist: mac_filter_info type: {type(mac_filter_info)}, content: {mac_filter_info}")
+
         if isinstance(mac_filter_info, dict):
             mac_list = mac_filter_info.get("mac_filter_data", [])
+            print(f"DEBUG remove_mac_from_whitelist: mac_list has {len(mac_list) if isinstance(mac_list, list) else 'N/A'} entries")
+
             if isinstance(mac_list, list):
                 for entry in mac_list:
-                    if entry.get("MAC", "").upper() == mac_address.upper():
+                    entry_mac = entry.get("MAC", "").upper()
+                    if entry_mac == mac_address.upper():
                         index = entry.get("ipv4_mac_filter_index", None)
+                        print(f"DEBUG remove_mac_from_whitelist: Found MAC at index {index}")
                         if index is not None:
                             data = {
                                 "action": "delete",
                                 "ipv4_mac_filter_index": str(index)
                             }
-                            return self.api_post("set_ipv4_mac_filter_info", data)
+                            result = self.api_post("set_ipv4_mac_filter_info", data)
+                            print(f"DEBUG remove_mac_from_whitelist: Delete result: {result}")
+                            return result
+                print(f"DEBUG remove_mac_from_whitelist: MAC {mac_address} not found in whitelist")
+        else:
+            print(f"DEBUG remove_mac_from_whitelist: mac_filter_info is not a dict")
         return False
 
     def is_private_connection(self, connection_string):
@@ -609,32 +726,151 @@ cleanup_thread = None
 cleanup_stop_event = threading.Event()
 
 
+def _poll_and_update_private_devices():
+    """Silently poll router to update private device timestamps."""
+    try:
+        if not router.ensure_connected():
+            print("Background poll: Router not connected, skipping update.")
+            return
+        
+        # Get currently connected devices from router
+        devices = router.get_connected_devices()
+        if not devices:
+            return
+        
+        # Get current whitelist to check which devices are whitelisted
+        whitelist = router.get_mac_whitelist()
+        whitelisted_macs = set()
+        mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
+        if isinstance(mac_filter_info, dict):
+            mac_list = mac_filter_info.get("mac_filter_data", [])
+            if isinstance(mac_list, list):
+                for entry in mac_list:
+                    mac_entry = entry.get("MAC", "").upper()
+                    if mac_entry:
+                        whitelisted_macs.add(mac_entry)
+        
+        # Update last_seen for all connected private devices that are whitelisted
+        updated_count = 0
+        for device in devices:
+            mac = device["mac"].upper()
+            connection = device.get("connection", "")
+            
+            # Only update private connection devices that are in the whitelist
+            if mac in whitelisted_macs and router.is_private_connection(connection):
+                _update_private_device_seen(mac)
+                updated_count += 1
+        
+        if updated_count > 0:
+            print(f"Background poll: Updated {updated_count} private device timestamp(s).")
+            
+    except Exception as e:
+        print(f"Background poll error: {e}")
+
+
+def mark_stale_private_devices():
+    """Check for private devices not seen in 6 hours (stale) and queue for removal."""
+    global pending_whitelist_removals
+    
+    with config_lock:
+        if not os.path.exists(CONFIG_FILE):
+            return []
+        
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+        
+        private_device_seen = config.get("private_device_seen", {})
+        current_time = int(time.time())
+        stale_threshold = 6 * 60 * 60  # 6 hours
+        stale_macs = []
+        
+        for mac, last_seen in list(private_device_seen.items()):
+            if current_time - last_seen > stale_threshold:
+                print(f"DEBUG mark_stale_private_devices: Device {mac} is stale (last seen {(current_time - last_seen) // 3600}h ago)")
+                stale_macs.append(mac)
+        
+        # Remove stale entries from config and queue for router removal
+        if stale_macs:
+            print(f"DEBUG mark_stale_private_devices: Marking {len(stale_macs)} stale private devices for removal")
+            for mac in stale_macs:
+                if mac in private_device_seen:
+                    del private_device_seen[mac]
+                # Also remove from manual_overrides if present (allow re-whitelisting if device returns)
+                manual_overrides = config.get("manual_overrides", {})
+                if mac in manual_overrides:
+                    del manual_overrides[mac]
+                    config["manual_overrides"] = manual_overrides
+            
+            config["private_device_seen"] = private_device_seen
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            # Add to pending removals queue
+            with pending_removals_lock:
+                for mac in stale_macs:
+                    if mac not in pending_whitelist_removals:
+                        pending_whitelist_removals.append(mac)
+        
+        return stale_macs
+
+
 def cleanup_expired_devices():
-    """Background thread that periodically checks for and removes expired public SSID devices."""
+    """Background thread that periodically checks for expired and stale devices.
+
+    Handles both:
+    1. Public SSID devices with expired 6-hour windows
+    2. Private connection devices not seen for 6 hours (MAC randomization cleanup)
+    
+    This thread also:
+    - Polls the router every 60 seconds to update 'last_seen' for private devices
+    - Processes the pending removal queue directly, so cleanup happens autonomously
+    """
     print("Background cleanup thread started.")
+    
+    # Counter to track when to poll for device updates (every 60 seconds)
+    poll_interval = 60  # Poll every 60 seconds (1 minute)
+    seconds_since_poll = poll_interval  # Start with a poll immediately
 
     while not cleanup_stop_event.is_set():
         try:
-            config = load_config()
-            if config.get("public_ssid_allowed", {}):
-                # Try to connect to router for whitelist removal (best effort)
-                router_connected = router.ensure_connected()
-                if not router_connected:
-                    print("Background cleanup: Router not connected, will still clean up config.")
-
-                # Always attempt cleanup - router removal is best effort
-                expired_macs = process_expired_devices(router)
-                if expired_macs:
-                    print(f"Background cleanup: Removed {len(expired_macs)} expired device(s).")
+            # Poll router for connected devices and update private device timestamps
+            # This runs every 60 seconds to keep 'last_seen' current
+            if seconds_since_poll >= poll_interval:
+                _poll_and_update_private_devices()
+                seconds_since_poll = 0
+            
+            # Mark expired public SSID devices
+            expired_macs = mark_expired_devices()
+            if expired_macs:
+                print(f"Background cleanup: Marked {len(expired_macs)} expired public SSID device(s).")
+            
+            # Mark stale private devices (MAC randomization cleanup)
+            stale_macs = mark_stale_private_devices()
+            if stale_macs:
+                print(f"Background cleanup: Marked {len(stale_macs)} stale private device(s).")
+            
+            # Process pending removals directly from background thread
+            # This ensures cleanup happens even when UI is not open
+            with pending_removals_lock:
+                has_pending = len(pending_whitelist_removals) > 0
+            
+            if has_pending:
+                # Ensure router is connected before processing removals
+                if router.ensure_connected():
+                    print("Background cleanup: Processing pending whitelist removals...")
+                    process_pending_removals(router)
+                else:
+                    print("Background cleanup: Router not connected, will retry removals later.")
+                    
         except Exception as e:
             print(f"Background cleanup error: {e}")
 
         # Wait for 15 seconds before next check, but check stop event every second
-        # Reduced from 60s to 15s for faster expired device removal
         for _ in range(15):
             if cleanup_stop_event.is_set():
                 break
             time.sleep(1)
+        seconds_since_poll += 15  # Increment by the sleep interval
 
     print("Background cleanup thread stopped.")
 
@@ -713,14 +949,22 @@ def login():
 
 @app.route('/api/auth/logout', methods=['POST'])
 def logout():
-    """Logout and clear credentials"""
+    """Logout from router and clear credentials"""
+    # First, properly logout from the router to terminate the session
+    # This allows other users to login to the router
+    router_logout_success = router.router_logout()
+    
+    if not router_logout_success:
+        print("Warning: Router logout may have failed, but clearing local credentials anyway")
+    
+    # Clear local credentials
     config = load_config()
     config["username"] = ""
     config["password"] = ""
     config["is_authenticated"] = False
     save_config(config)
-    router.is_connected = False
-    return jsonify({"success": True})
+    
+    return jsonify({"success": True, "router_logout": router_logout_success})
 
 
 @app.route('/api/auth/status')
@@ -744,8 +988,12 @@ def list_devices():
     if not router.ensure_connected():
         return jsonify({"error": "Failed to connect to router"}), 503
 
-    # Note: Expired device cleanup is handled by the background thread only
-    # This keeps the API response fast and avoids config race conditions
+    # Get list of MACs pending removal to show "red" status in UI
+    # Actual removal is handled by the background cleanup thread
+    with pending_removals_lock:
+        pending_removal_macs = set(mac.upper() for mac in pending_whitelist_removals)
+
+    # Fetch devices from router
     devices = router.get_connected_devices()
 
     # Get whitelist using global router
@@ -779,7 +1027,13 @@ def list_devices():
         time_display = "--:--:--"
         expires_timestamp = None
         is_expired = False
-        if mac in public_ssid_allowed:
+        is_pending_removal = mac in pending_removal_macs
+
+        if is_pending_removal:
+            # Device is queued for removal - show as expired immediately
+            time_display = "EXPIRED"
+            is_expired = True
+        elif mac in public_ssid_allowed:
             data = public_ssid_allowed[mac]
             expire_time = data.get("expires", 0) if isinstance(data, dict) else 0
             expires_timestamp = expire_time
@@ -792,8 +1046,9 @@ def list_devices():
                 is_expired = True
 
         # Determine status based on whitelist and overrides
-        # If device is expired, show red status immediately (background thread will remove from router)
-        if is_expired:
+        # If device is expired or pending removal, show red status immediately
+        # (background thread will remove from router)
+        if is_expired or is_pending_removal:
             status = "red"
         elif manual_overrides.get(mac) == "blocked":
             # Manual override takes priority - device is explicitly blocked
@@ -801,12 +1056,17 @@ def list_devices():
             status = "red"
         elif mac in whitelisted_macs:
             status = "green"
+            # Update last_seen for private connection devices (MAC randomization tracking)
+            if is_private:
+                _update_private_device_seen(mac)
         elif is_private:
             # Auto-whitelist private connection devices (only if not manually blocked)
             print(f"Auto-whitelisting private connection: {mac} ({connection})")
             if router.add_mac_to_whitelist(mac):
                 whitelisted_macs.add(mac)
                 status = "green"
+                # Track this private device for stale cleanup
+                _update_private_device_seen(mac)
             else:
                 print(f"Failed to auto-whitelist {mac}: {router.last_error}")
                 status = "red"
@@ -965,16 +1225,16 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("  PLDT WiFi Manager - Device Management Server")
     print("="*60)
-    print(f"  Access: http://192.168.1.2")
+    print(f"  Access: http://192.168.1.200")
     print(f"  Local:  http://localhost")
     print("="*60)
-    print(f"\n  Starting server on 0.0.0.0:{SERVER_PORT}...")
+    print(f"\n  Starting server on 192.168.1.200:{SERVER_PORT}...")
 
     try:
-        app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, threaded=True)
+        app.run(host='192.168.1.200', port=SERVER_PORT, debug=False, threaded=True)
     except PermissionError:
         print(f"\n  Note: Port {SERVER_PORT} unavailable (needs Admin).")
         print("  Falling back to port 5000...")
-        print(f"  Access: http://192.168.1.2:5000")
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        print(f"  Access: http://192.168.1.200:5000")
+        app.run(host='192.168.1.200', port=5000, debug=False, threaded=True)
 
