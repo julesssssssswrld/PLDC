@@ -1,10 +1,22 @@
 """PLDT WiFi Manager - Backend Server. Pure HTTP requests to router, no browser automation."""
 
 import os
+import sys
+
+# Add local libs folder to path (for SYSTEM service account to find packages)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LIBS_DIR = os.path.join(SCRIPT_DIR, 'libs')
+if os.path.exists(LIBS_DIR):
+    sys.path.insert(0, LIBS_DIR)
+
 import json
 import time
 import binascii
 import threading
+import uuid
+import subprocess
+import random
+import re
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import requests
@@ -14,6 +26,47 @@ from Crypto.Util.Padding import pad
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ============================================================
+# Logging Setup - Rotating file handler (~1MB total)
+# ============================================================
+import logging
+from logging.handlers import RotatingFileHandler
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, 'server.log')
+
+# Configure rotating handler: 500KB per file, keep 1 backup = ~1MB total
+log_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=500*1024, backupCount=1, encoding='utf-8'
+)
+log_handler.setFormatter(logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
+))
+
+# Setup root logger
+logging.basicConfig(level=logging.INFO, handlers=[log_handler])
+logger = logging.getLogger('PLDTWiFiManager')
+
+
+class StreamToLogger:
+    """Redirect stdout/stderr to logger."""
+    def __init__(self, log_level):
+        self.log_level = log_level
+        self.buffer = ''
+
+    def write(self, message):
+        if message and message.strip():
+            logger.log(self.log_level, message.strip())
+
+    def flush(self):
+        pass
+
+
+# Redirect print statements and errors to log file
+sys.stdout = StreamToLogger(logging.INFO)
+sys.stderr = StreamToLogger(logging.ERROR)
 
 
 
@@ -63,6 +116,76 @@ def save_config(config):
             json.dump(config, f, indent=2)
 
 
+def _extract_whitelisted_macs(whitelist_response):
+    """Extract set of whitelisted MACs from router whitelist response."""
+    whitelisted = set()
+    mac_filter_info = whitelist_response.get("ipv4_mac_filter_info", {})
+    if isinstance(mac_filter_info, dict):
+        mac_list = mac_filter_info.get("mac_filter_data", [])
+        if isinstance(mac_list, list):
+            for entry in mac_list:
+                mac = entry.get("MAC", "").upper()
+                if mac:
+                    whitelisted.add(mac)
+    return whitelisted
+
+
+def _convert_ip(ip_str):
+    """Convert router IP format (with _point_) to standard dotted notation."""
+    if ip_str and "_point_" in ip_str:
+        return ip_str.replace("_point_", ".")
+    return ip_str
+
+
+def get_host_mac():
+    """Get the MAC address of the host machine's primary network interface."""
+    try:
+        # Primary method: Use getmac command (faster and works under SYSTEM account)
+        result = subprocess.run(
+            ['getmac', '/FO', 'CSV', '/NH'],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Parse CSV output: "Physical Address","Transport Name"
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    mac = parts[0].strip('"').replace('-', ':').upper()
+                    transport = parts[1].strip('"')
+                    # Skip disconnected/virtual adapters
+                    if mac and len(mac) == 17 and 'Media disconnected' not in transport:
+                        return mac
+        
+        # Fallback: use uuid to get a MAC (may not be the active interface)
+        mac_int = uuid.getnode()
+        mac = ':'.join(('%012X' % mac_int)[i:i+2] for i in range(0, 12, 2))
+        return mac
+    except Exception as e:
+        print(f"Error getting host MAC: {e}")
+        return None
+
+
+def ensure_host_protected():
+    """Ensure the host machine's MAC is in the safe_macs list (replaces any previous entries)."""
+    host_mac = get_host_mac()
+    if not host_mac:
+        print("Warning: Could not determine host MAC address.")
+        return
+    
+    with config_lock:
+        config = load_config()
+        current_safe = config.get("safe_macs", [])
+        new_safe = [host_mac.upper()]
+        
+        # Only save if changed
+        if current_safe != new_safe:
+            config["safe_macs"] = new_safe
+            save_config(config)
+            print(f"Host MAC {host_mac} set as protected (replaced previous entries).")
+        else:
+            print(f"Host MAC {host_mac} already protected.")
+
+
 def format_time_remaining(expire_timestamp):
     """Format remaining time as HH:MM:SS, or return None if expired"""
     now = int(time.time())
@@ -94,12 +217,12 @@ def mark_expired_devices():
             expire_time = data.get("expires", 0) if isinstance(data, dict) else 0
 
             if current_time >= expire_time:
-                print(f"DEBUG mark_expired_devices: Device {mac} has expired")
+                logger.debug(f"Device {mac} has expired")
                 expired_macs.append(mac)
 
         # Remove expired entries from config and queue them for router removal
         if expired_macs:
-            print(f"DEBUG mark_expired_devices: Marking {len(expired_macs)} expired devices for removal")
+            logger.info(f"Marking {len(expired_macs)} expired device(s) for removal")
             for mac in expired_macs:
                 if mac in public_ssid_allowed:
                     del public_ssid_allowed[mac]
@@ -151,7 +274,7 @@ def process_pending_removals(router_instance):
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
-                print(f"DEBUG process_pending_removals: Removing {mac} (attempt {attempt + 1})")
+                logger.debug(f"Removing {mac} from whitelist (attempt {attempt + 1})")
                 result = router_instance.remove_mac_from_whitelist(mac)
                 
                 if result:
@@ -163,15 +286,15 @@ def process_pending_removals(router_instance):
                         mac_list = mac_filter_info.get("mac_filter_data", [])
                         still_exists = any(entry.get("MAC", "").upper() == mac.upper() for entry in mac_list if isinstance(mac_list, list))
                         if not still_exists:
-                            print(f"DEBUG process_pending_removals: Verified {mac} removed")
+                            logger.info(f"Verified {mac} removed from whitelist")
                             break
                         else:
-                            print(f"DEBUG process_pending_removals: {mac} still in whitelist, retrying...")
+                            logger.debug(f"{mac} still in whitelist, retrying...")
                 else:
-                    print(f"DEBUG process_pending_removals: Removal returned False for {mac}")
+                    logger.debug(f"Removal returned False for {mac}")
                     
             except Exception as e:
-                print(f"DEBUG process_pending_removals: Failed to remove {mac}: {e}")
+                logger.warning(f"Failed to remove {mac}: {e}")
             
             # Wait before retry (exponential backoff)
             if attempt < max_retries:
@@ -325,7 +448,7 @@ class PLDTRouter:
                     timeout=10
                 )
 
-                print(f"DEBUG router_logout status={response.status_code}")
+                logger.debug(f"Router logout status={response.status_code}")
 
                 # Clear session state regardless of response
                 self.session_id = None
@@ -407,7 +530,6 @@ class PLDTRouter:
                 self.refresh_session_id()
 
                 # All parameters go in POST body
-                import random
                 post_data = {
                     "ajaxmethod": method,
                     "sessionid": self.session_id,
@@ -424,7 +546,7 @@ class PLDTRouter:
                     timeout=10
                 )
 
-                print(f"DEBUG api_post {method} status={response.status_code}")
+                logger.debug(f"api_post {method} status={response.status_code}")
 
                 # Check if response indicates session invalid
                 result = self.parse_response(response.text)
@@ -444,7 +566,7 @@ class PLDTRouter:
                                 verify=False,
                                 timeout=10
                             )
-                            print(f"DEBUG api_post RETRY {method} status={response.status_code}")
+                            logger.debug(f"api_post RETRY {method} status={response.status_code}")
 
                 # Check for success
                 if response.status_code == 200:
@@ -502,7 +624,6 @@ class PLDTRouter:
         
         # Handle Ethernet connections
         if "LANEthernetInterfaceConfig" in layer2_interface:
-            import re
             match = re.search(r'LANEthernetInterfaceConfig\.(\d+)', layer2_interface)
             if match:
                 port_num = int(match.group(1))
@@ -511,7 +632,6 @@ class PLDTRouter:
         
         # Handle WiFi connections
         if "WLANConfiguration" in layer2_interface:
-            import re
             match = re.search(r'WLANConfiguration\.(\d+)', layer2_interface)
             if match:
                 wlan_index = match.group(1)
@@ -563,7 +683,7 @@ class PLDTRouter:
 
                 # Check for session invalidation
                 if data and data.get("session_valid") == 0:
-                    print("Session invalid detected in response. Re-logging in...")
+                    logger.info("Session invalid, re-logging in...")
                     config = load_config()
                     if config.get("username") and config.get("password"):
                         if self.login(config["username"], config["password"]):
@@ -580,11 +700,6 @@ class PLDTRouter:
 
                 devices = []
 
-                def convert_ip(ip_str):
-                    if ip_str and "_point_" in ip_str:
-                        return ip_str.replace("_point_", ".")
-                    return ip_str
-
                 # Parse get_lan_status structure
                 if data and "get_lan_status" in data:
                     lan_status = data["get_lan_status"]
@@ -596,7 +711,7 @@ class PLDTRouter:
                             if not mac:
                                 continue
 
-                            ip = convert_ip(item.get("IPAddress", "") or "")
+                            ip = _convert_ip(item.get("IPAddress", "") or "")
                             hostname = item.get("HostName", "") or "Unknown"
 
                             layer2_interface = item.get("Layer2Interface", "")
@@ -622,7 +737,7 @@ class PLDTRouter:
                             if not mac:
                                 continue
 
-                            ip = convert_ip(item.get("IPAddress", "") or "")
+                            ip = _convert_ip(item.get("IPAddress", "") or "")
                             hostname = item.get("HostName", "") or "Unknown"
 
                             layer2_interface = item.get("Layer2Interface", "")
@@ -639,13 +754,11 @@ class PLDTRouter:
                                 "connection": connection
                             })
 
-                print(f"DEBUG DEVICES FOUND: {len(devices)}")
+                logger.debug(f"Found {len(devices)} connected devices")
                 return devices
 
             except Exception as e:
-                print(f"Error getting devices: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"Error getting devices: {e}")
                 return []
 
     def get_mac_whitelist(self):
@@ -668,34 +781,29 @@ class PLDTRouter:
     
     def remove_mac_from_whitelist(self, mac_address):
         """Remove MAC address from whitelist by finding its index"""
-        print(f"DEBUG remove_mac_from_whitelist: Attempting to remove {mac_address}")
+        logger.debug(f"Attempting to remove {mac_address} from whitelist")
         whitelist = self.get_mac_whitelist()
-        print(f"DEBUG remove_mac_from_whitelist: Whitelist response keys: {whitelist.keys() if whitelist else 'None'}")
 
         mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
-        print(f"DEBUG remove_mac_from_whitelist: mac_filter_info type: {type(mac_filter_info)}, content: {mac_filter_info}")
 
         if isinstance(mac_filter_info, dict):
             mac_list = mac_filter_info.get("mac_filter_data", [])
-            print(f"DEBUG remove_mac_from_whitelist: mac_list has {len(mac_list) if isinstance(mac_list, list) else 'N/A'} entries")
 
             if isinstance(mac_list, list):
                 for entry in mac_list:
                     entry_mac = entry.get("MAC", "").upper()
                     if entry_mac == mac_address.upper():
                         index = entry.get("ipv4_mac_filter_index", None)
-                        print(f"DEBUG remove_mac_from_whitelist: Found MAC at index {index}")
+                        logger.debug(f"Found MAC at index {index}")
                         if index is not None:
                             data = {
                                 "action": "delete",
                                 "ipv4_mac_filter_index": str(index)
                             }
                             result = self.api_post("set_ipv4_mac_filter_info", data)
-                            print(f"DEBUG remove_mac_from_whitelist: Delete result: {result}")
+                            logger.debug(f"Delete result: {result}")
                             return result
-                print(f"DEBUG remove_mac_from_whitelist: MAC {mac_address} not found in whitelist")
-        else:
-            print(f"DEBUG remove_mac_from_whitelist: mac_filter_info is not a dict")
+                logger.debug(f"MAC {mac_address} not found in whitelist")
         return False
 
     def is_private_connection(self, connection_string):
@@ -730,7 +838,7 @@ def _poll_and_update_private_devices():
     """Silently poll router to update private device timestamps."""
     try:
         if not router.ensure_connected():
-            print("Background poll: Router not connected, skipping update.")
+            logger.debug("Background poll: Router not connected, skipping update.")
             return
         
         # Get currently connected devices from router
@@ -740,15 +848,7 @@ def _poll_and_update_private_devices():
         
         # Get current whitelist to check which devices are whitelisted
         whitelist = router.get_mac_whitelist()
-        whitelisted_macs = set()
-        mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
-        if isinstance(mac_filter_info, dict):
-            mac_list = mac_filter_info.get("mac_filter_data", [])
-            if isinstance(mac_list, list):
-                for entry in mac_list:
-                    mac_entry = entry.get("MAC", "").upper()
-                    if mac_entry:
-                        whitelisted_macs.add(mac_entry)
+        whitelisted_macs = _extract_whitelisted_macs(whitelist)
         
         # Update last_seen for all connected private devices that are whitelisted
         updated_count = 0
@@ -762,10 +862,10 @@ def _poll_and_update_private_devices():
                 updated_count += 1
         
         if updated_count > 0:
-            print(f"Background poll: Updated {updated_count} private device timestamp(s).")
+            logger.debug(f"Background poll: Updated {updated_count} private device timestamp(s).")
             
     except Exception as e:
-        print(f"Background poll error: {e}")
+        logger.warning(f"Background poll error: {e}")
 
 
 def mark_stale_private_devices():
@@ -780,18 +880,22 @@ def mark_stale_private_devices():
             config = json.load(f)
         
         private_device_seen = config.get("private_device_seen", {})
+        safe_macs = set(m.upper() for m in config.get("safe_macs", []))
         current_time = int(time.time())
         stale_threshold = 6 * 60 * 60  # 6 hours
         stale_macs = []
         
         for mac, last_seen in list(private_device_seen.items()):
+            # Skip protected MACs (e.g., host machine)
+            if mac.upper() in safe_macs:
+                continue
             if current_time - last_seen > stale_threshold:
-                print(f"DEBUG mark_stale_private_devices: Device {mac} is stale (last seen {(current_time - last_seen) // 3600}h ago)")
+                logger.debug(f"Device {mac} is stale (last seen {(current_time - last_seen) // 3600}h ago)")
                 stale_macs.append(mac)
         
         # Remove stale entries from config and queue for router removal
         if stale_macs:
-            print(f"DEBUG mark_stale_private_devices: Marking {len(stale_macs)} stale private devices for removal")
+            logger.info(f"Marking {len(stale_macs)} stale private device(s) for removal")
             for mac in stale_macs:
                 if mac in private_device_seen:
                     del private_device_seen[mac]
@@ -825,7 +929,7 @@ def cleanup_expired_devices():
     - Polls the router every 60 seconds to update 'last_seen' for private devices
     - Processes the pending removal queue directly, so cleanup happens autonomously
     """
-    print("Background cleanup thread started.")
+    logger.info("Background cleanup thread started.")
     
     # Counter to track when to poll for device updates (every 60 seconds)
     poll_interval = 60  # Poll every 60 seconds (1 minute)
@@ -842,12 +946,12 @@ def cleanup_expired_devices():
             # Mark expired public SSID devices
             expired_macs = mark_expired_devices()
             if expired_macs:
-                print(f"Background cleanup: Marked {len(expired_macs)} expired public SSID device(s).")
+                logger.info(f"Marked {len(expired_macs)} expired public SSID device(s) for removal.")
             
             # Mark stale private devices (MAC randomization cleanup)
             stale_macs = mark_stale_private_devices()
             if stale_macs:
-                print(f"Background cleanup: Marked {len(stale_macs)} stale private device(s).")
+                logger.info(f"Marked {len(stale_macs)} stale private device(s) for removal.")
             
             # Process pending removals directly from background thread
             # This ensures cleanup happens even when UI is not open
@@ -857,13 +961,13 @@ def cleanup_expired_devices():
             if has_pending:
                 # Ensure router is connected before processing removals
                 if router.ensure_connected():
-                    print("Background cleanup: Processing pending whitelist removals...")
+                    logger.debug("Processing pending whitelist removals...")
                     process_pending_removals(router)
                 else:
-                    print("Background cleanup: Router not connected, will retry removals later.")
+                    logger.debug("Router not connected, will retry removals later.")
                     
         except Exception as e:
-            print(f"Background cleanup error: {e}")
+            logger.error(f"Background cleanup error: {e}")
 
         # Wait for 15 seconds before next check, but check stop event every second
         for _ in range(15):
@@ -872,7 +976,7 @@ def cleanup_expired_devices():
             time.sleep(1)
         seconds_since_poll += 15  # Increment by the sleep interval
 
-    print("Background cleanup thread stopped.")
+    logger.info("Background cleanup thread stopped.")
 
 
 def start_cleanup_thread():
@@ -955,7 +1059,7 @@ def logout():
     router_logout_success = router.router_logout()
     
     if not router_logout_success:
-        print("Warning: Router logout may have failed, but clearing local credentials anyway")
+        logger.warning("Router logout may have failed, clearing local credentials anyway")
     
     # Clear local credentials
     config = load_config()
@@ -982,7 +1086,7 @@ def auth_status():
 @app.route('/api/devices', methods=['GET'])
 def list_devices():
     # Use global router instance with ensure_connected for session consistency
-    print("Fetching device list using global router instance...")
+    logger.debug("Fetching device list...")
 
     # Ensure we're connected before fetching devices
     if not router.ensure_connected():
@@ -998,16 +1102,7 @@ def list_devices():
 
     # Get whitelist using global router
     whitelist = router.get_mac_whitelist()
-    whitelisted_macs = set()
-    
-    mac_filter_info = whitelist.get("ipv4_mac_filter_info", {})
-    if isinstance(mac_filter_info, dict):
-        mac_list = mac_filter_info.get("mac_filter_data", [])
-        if isinstance(mac_list, list):
-            for entry in mac_list:
-                mac_entry = entry.get("MAC", "").upper()
-                if mac_entry:
-                    whitelisted_macs.add(mac_entry)
+    whitelisted_macs = _extract_whitelisted_macs(whitelist)
     
     # Load config for overrides and public SSID tracking
     config = load_config()
@@ -1061,14 +1156,14 @@ def list_devices():
                 _update_private_device_seen(mac)
         elif is_private:
             # Auto-whitelist private connection devices (only if not manually blocked)
-            print(f"Auto-whitelisting private connection: {mac} ({connection})")
+            logger.info(f"Auto-whitelisting private connection: {mac} ({connection})")
             if router.add_mac_to_whitelist(mac):
                 whitelisted_macs.add(mac)
                 status = "green"
                 # Track this private device for stale cleanup
                 _update_private_device_seen(mac)
             else:
-                print(f"Failed to auto-whitelist {mac}: {router.last_error}")
+                logger.warning(f"Failed to auto-whitelist {mac}: {router.last_error}")
                 status = "red"
         else:
             status = "red"
@@ -1213,6 +1308,9 @@ def set_private_ssids():
 
 def init_app():
     """Initialize application"""
+    # Protect host machine from cleanup
+    ensure_host_protected()
+    
     # Try to login with saved credentials
     config = load_config()
     if config.get("username") and config.get("password"):
@@ -1228,13 +1326,36 @@ if __name__ == '__main__':
     print(f"  Access: http://192.168.1.200")
     print(f"  Local:  http://localhost")
     print("="*60)
-    print(f"\n  Starting server on 192.168.1.200:{SERVER_PORT}...")
+    print(f"\n  Starting server on port {SERVER_PORT}...")
 
-    try:
-        app.run(host='192.168.1.200', port=SERVER_PORT, debug=False, threaded=True)
-    except PermissionError:
-        print(f"\n  Note: Port {SERVER_PORT} unavailable (needs Admin).")
-        print("  Falling back to port 5000...")
-        print(f"  Access: http://192.168.1.200:5000")
-        app.run(host='192.168.1.200', port=5000, debug=False, threaded=True)
+    # Try binding with retries - handles service startup before network is ready
+    max_retries = 5
+    retry_delay = 3  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            # First try the specific IP
+            print(f"  Attempt {attempt + 1}/{max_retries}: Binding to 192.168.1.200:{SERVER_PORT}...")
+            app.run(host='192.168.1.200', port=SERVER_PORT, debug=False, threaded=True)
+            break  # If we get here after shutdown, exit cleanly
+        except OSError as e:
+            # OSError includes "Cannot assign requested address" when IP not bound yet
+            if attempt < max_retries - 1:
+                print(f"  IP not ready yet ({e}), retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+            else:
+                # Final fallback - bind to all interfaces
+                print(f"  Could not bind to 192.168.1.200, using 0.0.0.0 (all interfaces)...")
+                try:
+                    app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, threaded=True)
+                except PermissionError:
+                    print(f"\n  Port {SERVER_PORT} requires Admin. Falling back to port 5000...")
+                    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        except PermissionError:
+            print(f"\n  Port {SERVER_PORT} requires Admin. Falling back to port 5000...")
+            try:
+                app.run(host='192.168.1.200', port=5000, debug=False, threaded=True)
+            except OSError:
+                app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+            break
 

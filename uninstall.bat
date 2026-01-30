@@ -1,11 +1,17 @@
 @echo off
 :: PLDT WiFi Manager - Uninstall/Cleanup Script
-:: Removes configurations added by setup.bat (Firewall rules, legacy IPs)
+:: Removes: Scheduled Task, Firewall rules, IPs, libs, and logs
+
+:: Safety wrapper - keeps window open
+if not "%~1"=="--wrapped" (
+    cmd /k "%~f0" --wrapped
+    exit /b
+)
 
 setlocal EnableDelayedExpansion
-
-:: Change to script directory first
 cd /d "%~dp0"
+
+set "TASK_NAME=PLDTWiFiManager"
 
 echo ============================================================
 echo   PLDT WiFi Manager - Uninstall / Cleanup
@@ -16,42 +22,58 @@ echo.
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo   ERROR: Please run this script as Administrator!
-    echo   Right-click on uninstall.bat and select "Run as administrator"
-    echo.
-    pause
     exit /b 1
 )
 
-echo   Running with Administrator privileges...
+echo   Running cleanup...
 echo.
-echo   This will remove:
-echo   - Firewall rules for ports 80 and 5000
-echo   - Legacy IP addresses (if present)
-echo.
-set /p CONFIRM="Are you sure you want to continue? (Y/N): "
-if /i not "%CONFIRM%"=="Y" (
-    echo.
-    echo   Cancelled.
-    pause
-    exit /b 0
+
+:: Step 1: Kill Python and remove scheduled task
+echo [1/4] Stopping server and removing scheduled task...
+taskkill /f /im python.exe >nul 2>&1
+schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1
+echo       [OK] Done
+
+:: Step 2: Remove NSSM service if exists (legacy cleanup)
+echo [2/4] Cleaning up legacy NSSM service...
+sc query %TASK_NAME% >nul 2>&1
+if !errorLevel! equ 0 (
+    if exist "%~dp0nssm\nssm.exe" (
+        "%~dp0nssm\nssm.exe" stop %TASK_NAME% >nul 2>&1
+        timeout /t 1 /nobreak >nul
+        "%~dp0nssm\nssm.exe" remove %TASK_NAME% confirm >nul 2>&1
+    ) else (
+        sc stop %TASK_NAME% >nul 2>&1
+        sc delete %TASK_NAME% >nul 2>&1
+    )
 )
-echo.
+if exist "%~dp0nssm" rmdir /s /q "%~dp0nssm" >nul 2>&1
+echo       [OK] Done
 
-:: Step 1: Remove firewall rules
-echo [1/2] Removing firewall rules...
+:: Step 3: Remove firewall, logs, libs
+echo [3/4] Removing firewall rules and files...
 netsh advfirewall firewall delete rule name="PLDT WiFi Manager HTTP" >nul 2>&1
-netsh advfirewall firewall delete rule name="PLDT WiFi Manager Fallback" >nul 2>&1
-netsh advfirewall firewall delete rule name="PLDT WiFi Manager" >nul 2>&1
-echo       [OK] Firewall rules removed
+if exist "%~dp0logs" rmdir /s /q "%~dp0logs" >nul 2>&1
+if exist "%~dp0libs" rmdir /s /q "%~dp0libs" >nul 2>&1
+if exist "%~dp0start_service.cmd" del /f "%~dp0start_service.cmd" >nul 2>&1
+echo       [OK] Done
 
-:: Step 2: Remove legacy IP addresses (best effort)
-echo [2/2] Removing legacy IP addresses...
-powershell -ExecutionPolicy Bypass -NoProfile -Command "try { Remove-NetIPAddress -IPAddress '192.168.1.2' -Confirm:$false -ErrorAction SilentlyContinue; Write-Host '      [OK] Removed IP 192.168.1.2' } catch { }"
-powershell -ExecutionPolicy Bypass -NoProfile -Command "try { Remove-NetIPAddress -IPAddress '192.168.1.200' -Confirm:$false -ErrorAction SilentlyContinue; Write-Host '      [OK] Removed IP 192.168.1.200' } catch { }"
+:: Step 4: Reset network to DHCP
+echo [4/4] Resetting network to DHCP...
+set "IFACE_NAME=Wi-Fi"
+netsh interface show interface "Wi-Fi" 2>nul | findstr /C:"Connected" >nul 2>&1
+if !errorLevel! neq 0 (
+    netsh interface show interface "Ethernet" 2>nul | findstr /C:"Connected" >nul 2>&1
+    if !errorLevel! equ 0 set "IFACE_NAME=Ethernet"
+)
+powershell -NoProfile -Command "Remove-NetIPAddress -IPAddress '192.168.1.200' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
+netsh interface ipv4 set address name="!IFACE_NAME!" source=dhcp >nul 2>&1
+netsh interface ipv4 set dns name="!IFACE_NAME!" source=dhcp >nul 2>&1
+echo       [OK] Done
 
 echo.
 echo ============================================================
-echo   Cleanup Complete!
+echo   Uninstall Complete!
 echo ============================================================
 echo.
-pause
+exit /b

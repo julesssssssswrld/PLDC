@@ -8,5 +8,8 @@
     "Offline_5G"
   ],
   "manual_overrides": {},
-  "public_ssid_allowed": {}
+  "public_ssid_allowed": {},
+  "safe_macs": [
+    "C0:35:32:5F:AF:CC"
+  ]
 }
